@@ -4,21 +4,23 @@ import threading
 from debug_toolbar.decorators import require_show_toolbar
 from debug_toolbar.panels.sql import SQLPanel
 from debug_toolbar.panels.sql.forms import SQLSelectForm
-from django.conf.urls import url
-from django.http import HttpResponseBadRequest
+from django.urls import re_path
+from django.http import HttpResponseBadRequest, JsonResponse
 from django.template.response import SimpleTemplateResponse
+from django.template.loader import render_to_string
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.csrf import csrf_exempt
-
-
+from debug_toolbar.panels.sql.views import get_signed_data
+import requests
+import re
 class PevSQLPanel(SQLPanel):
     template = 'pev_sql/sql_panel.html'
 
     @classmethod
     def get_urls(cls):
         return super().get_urls() + [
-            url(r'^sql_pev/$', sql_pev, name='sql_pev'),
-            url(r'^pev/$', pev, name='pev'),
+            re_path(r'^sql_pev/$', sql_pev, name='sql_pev'),
+            re_path(r'^pev/$', pev, name='pev'),
         ]
 
 
@@ -26,7 +28,8 @@ class PevSQLPanel(SQLPanel):
 @require_show_toolbar
 def sql_pev(request):
     """Returns the output of the SQL EXPLAIN on the given query"""
-    form = SQLSelectForm(request.POST or None)
+    signed = get_signed_data(request)
+    form = SQLSelectForm(signed or None)
     if not form.is_valid():
         return HttpResponseBadRequest('Form errors')
 
@@ -36,15 +39,15 @@ def sql_pev(request):
     cursor.execute("EXPLAIN (ANALYZE, VERBOSE, BUFFERS, FORMAT JSON) %s" % (sql,), params)
     plan, = cursor.fetchone()
 
-    context = {
-        'plan_content': json.dumps(plan),
-        'plan_name': 'Test',
-        'plan_query': sql,
-        'base': request.path,
+    post_data = {
+        'plan': json.dumps(plan),
+        'title': request.path, #XXX######################################################################################
+        'query': sql,
     }
-
-    # Using SimpleTemplateResponse avoids running global context processors.
-    return SimpleTemplateResponse('pev_sql/pev_wrapper.html', context)
+    response = requests.post('https://explain.dalibo.com/new', data=post_data)
+    url = re.findall(r'<a href="\/plan/(.+)"', response.text)[0]
+    content = render_to_string("pev_sql/pev_wrapper.html", {"url": url})
+    return JsonResponse({"content": content})
 
 
 @xframe_options_sameorigin
@@ -55,7 +58,7 @@ def pev(request):
     """
     # Disable the DJDT toolbar in our iframe
     from debug_toolbar.middleware import DebugToolbarMiddleware
-    DebugToolbarMiddleware.debug_toolbars[threading.current_thread().ident] = None
+    #DebugToolbarMiddleware.debug_toolbars[threading.current_thread().ident] = None
 
     # Using SimpleTemplateResponse avoids running global context processors.
     return SimpleTemplateResponse('pev_sql/pev.html')
